@@ -8,3 +8,4 @@ i386 Support
    :maxdepth: 2
 
    IO-APIC
+   hololens1-retail
