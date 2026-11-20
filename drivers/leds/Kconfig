@@ -8,6 +8,17 @@ config LEDS_GPIO_REGISTER
 
 # This library does not depend on NEW_LEDS and must be independent so it can be
 # selected from other subsystems (specifically backlight).
+config LEDS_FAN5702
+	tristate "FAN5702 status LED support for Microsoft HoloLens 1"
+	depends on LEDS_CLASS && I2C && GPIO_ACPI
+	help
+	  Enable control of the five status LED channels on the first-generation
+	  Microsoft HoloLens. The FAN5702 is connected over I2C and enabled by
+	  a GPIO described by ACPI.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called leds-fan5702.
+
 config LEDS_EXPRESSWIRE
 	bool
 	depends on GPIOLIB
