@@ -24,6 +24,13 @@ drivers to discover eMMC after boot. SimpleDRM can use a framebuffer
 supplied by the firmware. The DesignWare USB PCI driver and the configfs
 CDC ACM gadget components are built as modules for USB diagnostics.
 
+The FAN5702 and LED timer trigger build as modules. Include
+``drivers/leds/leds-fan5702.ko`` in the initramfs or install it alongside
+the retail kernel. The module matches ACPI ID ``MSFT0A0B`` and provides
+``hololens::status-1`` through ``hololens::status-5`` under
+``/sys/class/leds``. Each exposes brightness levels 0 through 40.
+Record the physical segment controlled by each channel on the headset.
+
 A 32-bit UEFI virtual machine can exercise the EFI and initramfs path.
 Headset bring-up requires a firmware-authorized launch path. After boot,
 record the live ACPI and PCI inventory and check which eMMC interface is
