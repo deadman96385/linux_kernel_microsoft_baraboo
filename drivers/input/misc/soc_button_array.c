@@ -267,31 +267,18 @@ static int soc_button_get_acpi_object_int(const union acpi_object *obj)
 	return obj->integer.value;
 }
 
-/* Parse a single ACPI0011 _DSD button descriptor */
-static int soc_button_parse_btn_desc(struct device *dev,
-				     const union acpi_object *desc,
-				     int collection_uid,
-				     struct soc_button_info *info)
+/* Map a validated ACPI0011 control descriptor to an input event. */
+static void soc_button_parse_btn_desc(struct device *dev,
+				      const union acpi_object *fields,
+				      struct soc_button_info *info)
 {
 	int upage, usage;
 
-	if (desc->type != ACPI_TYPE_PACKAGE ||
-	    desc->package.count != 5 ||
-	    /* First byte should be 1 (control) */
-	    soc_button_get_acpi_object_int(&desc->package.elements[0]) != 1 ||
-	    /* Third byte should be collection uid */
-	    soc_button_get_acpi_object_int(&desc->package.elements[2]) !=
-							    collection_uid) {
-		dev_err(dev, "Invalid ACPI Button Descriptor\n");
-		return -ENODEV;
-	}
-
 	info->event_type = EV_KEY;
 	info->active_low = true;
-	info->acpi_index =
-		soc_button_get_acpi_object_int(&desc->package.elements[1]);
-	upage = soc_button_get_acpi_object_int(&desc->package.elements[3]);
-	usage = soc_button_get_acpi_object_int(&desc->package.elements[4]);
+	info->acpi_index = fields[1].integer.value;
+	upage = soc_button_get_acpi_object_int(&fields[3]);
+	usage = soc_button_get_acpi_object_int(&fields[4]);
 
 	/*
 	 * The UUID: fa6bd625-9ce8-470d-a2c7-b3ca36c4282e descriptors use HID
@@ -320,6 +307,14 @@ static int soc_button_parse_btn_desc(struct device *dev,
 		info->name = "home";
 		info->event_code = KEY_LEFTMETA;
 		info->wakeup = true;
+	} else if (upage == 0x0c && usage == 0x6f) {
+		info->name = "brightness_up";
+		info->event_code = KEY_BRIGHTNESSUP;
+		info->autorepeat = true;
+	} else if (upage == 0x0c && usage == 0x70) {
+		info->name = "brightness_down";
+		info->event_code = KEY_BRIGHTNESSDOWN;
+		info->autorepeat = true;
 	} else if (upage == 0x0c && usage == 0xe9) {
 		info->name = "volume_up";
 		info->event_code = KEY_VOLUMEUP;
@@ -334,8 +329,6 @@ static int soc_button_parse_btn_desc(struct device *dev,
 		info->name = "unknown";
 		info->event_code = KEY_RESERVED;
 	}
-
-	return 0;
 }
 
 /* ACPI0011 _DSD btns descriptors UUID: fa6bd625-9ce8-470d-a2c7-b3ca36c4282e */
@@ -344,14 +337,85 @@ static const u8 btns_desc_uuid[16] = {
 	0xa2, 0xc7, 0xb3, 0xca, 0x36, 0xc4, 0x28, 0x2e
 };
 
+static bool soc_button_has_collection(const union acpi_object *descs, u64 uid)
+{
+	const union acpi_object *fields;
+	unsigned int i;
+
+	/* The caller has validated the descriptor layout. */
+	for (i = 0; i < descs->package.count; i++) {
+		fields = descs->package.elements[i].package.elements;
+		if (fields[0].integer.value == 0 && fields[1].integer.value == uid)
+			return true;
+	}
+
+	return false;
+}
+
+static struct soc_button_info *
+soc_button_parse_descriptors(struct device *dev, const union acpi_object *descs)
+{
+	struct soc_button_info *button_info;
+	const union acpi_object *desc, *fields;
+	unsigned int i, nbuttons = 0;
+
+	for (i = 0; i < descs->package.count; i++) {
+		desc = &descs->package.elements[i];
+		if (desc->type != ACPI_TYPE_PACKAGE || desc->package.count != 5)
+			goto invalid;
+
+		fields = desc->package.elements;
+		if (fields[0].type != ACPI_TYPE_INTEGER ||
+		    fields[1].type != ACPI_TYPE_INTEGER ||
+		    fields[2].type != ACPI_TYPE_INTEGER)
+			goto invalid;
+
+		/* A collection descriptor must describe a top-level collection. */
+		if (fields[0].integer.value == 0 && fields[2].integer.value == 0)
+			continue;
+
+		if (fields[0].integer.value != 1 || fields[1].integer.value > INT_MAX)
+			goto invalid;
+
+		nbuttons++;
+	}
+
+	if (nbuttons == descs->package.count)
+		goto invalid;
+
+	/* Reserve a terminating empty entry. */
+	button_info = devm_kcalloc(dev, nbuttons + 1, sizeof(*button_info),
+				  GFP_KERNEL);
+	if (!button_info)
+		return ERR_PTR(-ENOMEM);
+
+	nbuttons = 0;
+	for (i = 0; i < descs->package.count; i++) {
+		fields = descs->package.elements[i].package.elements;
+		if (fields[0].integer.value == 0)
+			continue;
+
+		if (!soc_button_has_collection(descs, fields[2].integer.value))
+			goto invalid;
+
+		soc_button_parse_btn_desc(dev, fields, &button_info[nbuttons++]);
+	}
+
+	return button_info;
+
+invalid:
+	dev_err(dev, "Invalid ACPI Button Descriptor\n");
+	return ERR_PTR(-ENODEV);
+}
+
 /* Parse ACPI0011 _DSD button descriptors */
 static struct soc_button_info *soc_button_get_button_info(struct device *dev)
 {
 	struct acpi_buffer buf = { ACPI_ALLOCATE_BUFFER };
-	const union acpi_object *desc, *el0, *uuid, *btns_desc = NULL;
+	const union acpi_object *desc, *uuid, *btns_desc = NULL;
 	struct soc_button_info *button_info;
 	acpi_status status;
-	int i, btn, collection_uid = -1;
+	unsigned int i;
 
 	status = acpi_evaluate_object_typed(ACPI_HANDLE(dev), "_DSD", NULL,
 					    &buf, ACPI_TYPE_PACKAGE);
@@ -383,41 +447,7 @@ static struct soc_button_info *soc_button_get_button_info(struct device *dev)
 		goto out;
 	}
 
-	/* The first package describes the collection */
-	el0 = &btns_desc->package.elements[0];
-	if (el0->type == ACPI_TYPE_PACKAGE &&
-	    el0->package.count == 5 &&
-	    /* First byte should be 0 (collection) */
-	    soc_button_get_acpi_object_int(&el0->package.elements[0]) == 0 &&
-	    /* Third byte should be 0 (top level collection) */
-	    soc_button_get_acpi_object_int(&el0->package.elements[2]) == 0) {
-		collection_uid = soc_button_get_acpi_object_int(
-						&el0->package.elements[1]);
-	}
-	if (collection_uid == -1) {
-		dev_err(dev, "Invalid Button Collection Descriptor\n");
-		button_info = ERR_PTR(-ENODEV);
-		goto out;
-	}
-
-	/* There are package.count - 1 buttons + 1 terminating empty entry */
-	button_info = devm_kcalloc(dev, btns_desc->package.count,
-				   sizeof(*button_info), GFP_KERNEL);
-	if (!button_info) {
-		button_info = ERR_PTR(-ENOMEM);
-		goto out;
-	}
-
-	/* Parse the button descriptors */
-	for (i = 1, btn = 0; i < btns_desc->package.count; i++, btn++) {
-		if (soc_button_parse_btn_desc(dev,
-					      &btns_desc->package.elements[i],
-					      collection_uid,
-					      &button_info[btn])) {
-			button_info = ERR_PTR(-ENODEV);
-			goto out;
-		}
-	}
+	button_info = soc_button_parse_descriptors(dev, btns_desc);
 
 out:
 	kfree(buf.pointer);
